@@ -15,12 +15,13 @@ The medical-record prototype data is currently stored locally in:
 Authentication/user data is NOT read from users.json.
 """
 
+from fastapi import requests
 import streamlit as st
 import json
 import os
 import uuid
 from datetime import datetime, date
-
+import requests as http_requests
 from api_client import (
     register_user,
     login_user,
@@ -40,7 +41,9 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 
 PATIENTS_FILE = os.path.join(DATA_DIR, "patients.json")
+#medical document storage 
 
+UPLOADS_DIR = os.path.join(DATA_DIR, "uploads") 
 ROLES = ["Patient", "Doctor", "CHW"]
 
 TIMELINE_EVENT_TYPES = [
@@ -69,7 +72,7 @@ st.set_page_config(
 
 def ensure_data_dir():
     os.makedirs(DATA_DIR, exist_ok=True)
-
+    os.makedirs(UPLOADS_DIR, exist_ok=True)
 
 def load_db(path):
     ensure_data_dir()
@@ -284,7 +287,7 @@ def inject_css():
             margin-top: 0.4rem;
         }
 
-        %.stButton > button {
+        .stButton > button {
             border-radius: 10px;
         }
 
@@ -1347,62 +1350,58 @@ def patient_profile_page(user):
         "</div>",
         unsafe_allow_html=True,
     )
-
-# ==============================================================
-# HEALTHCARE TIMELINE
-# ==============================================================
-
 def timeline_page(
     patient_id,
     editable=True,
 ):
+    """
+    Healthcare Timeline
+
+    Supports:
+    1. Manual events added by Patient / Doctor / CHW
+    2. Future AI-generated events from the n8n workflow
+    """
 
     if not patient_id:
-
-        st.error(
-            "No patient selected."
-        )
-
+        st.error("No patient selected.")
         return
 
-    patient, patients = get_patient_record(
-        patient_id
-    )
+    patient, patients = get_patient_record(patient_id)
 
     if patient is None:
-
-        empty_state(
-            "Patient record not found."
-        )
-
+        empty_state("Patient record not found.")
         return
 
-    patient.setdefault(
-        "timeline",
-        [],
-    )
+    # ----------------------------------------------------------
+    # Make sure timeline exists
+    # ----------------------------------------------------------
 
-    # ==========================================================
-    # PAGE
-    # ==========================================================
+    patient.setdefault("timeline", [])
+
+    # ----------------------------------------------------------
+    # PAGE HEADER
+    # ----------------------------------------------------------
 
     st.markdown(
         '<div class="mp-card"><h4>Healthcare Timeline</h4>',
         unsafe_allow_html=True,
     )
 
+    st.caption(
+        "A chronological view of the patient's medical history, "
+        "including manually recorded and AI-generated events."
+    )
+
     # ==========================================================
-    # ADD EVENT
+    # ADD MANUAL EVENT
     # ==========================================================
 
     if editable:
 
-        with st.expander(
-            "➕ Add Event"
-        ):
+        with st.expander("➕ Add Event"):
 
             with st.form(
-                "add_event_form",
+                f"add_event_form_{patient_id}",
                 clear_on_submit=True
             ):
 
@@ -1419,7 +1418,6 @@ def timeline_page(
                 description = st.text_area(
                     "Description",
                     placeholder="Enter event details",
-                    key="timeline_description",
                 )
 
                 submitted = st.form_submit_button(
@@ -1438,20 +1436,30 @@ def timeline_page(
                     else:
 
                         # --------------------------------------------------
-                        # Add event
+                        # Create manual timeline event
                         # --------------------------------------------------
 
+                        new_event = {
+                            "id": new_id("EVT"),
+
+                            "type": event_type,
+
+                            "date": str(event_date),
+
+                            "description": description.strip(),
+
+                            # Source helps distinguish manual vs AI events
+                            "source": "manual",
+
+                            "ai_generated": False,
+                        }
+
                         patient["timeline"].append(
-                            {
-                                "id": new_id("EVT"),
-                                "type": event_type,
-                                "date": str(event_date),
-                                "description": description.strip(),
-                            }
+                            new_event
                         )
 
                         # --------------------------------------------------
-                        # Save patient record
+                        # Save
                         # --------------------------------------------------
 
                         save_patient_record(
@@ -1464,22 +1472,10 @@ def timeline_page(
                             "Event added to timeline."
                         )
 
-                        # --------------------------------------------------
-                        # Clear form value
-                        #
-                        # clear_on_submit=True already clears the form.
-                        # This session-state reset is kept as an additional
-                        # safeguard for Streamlit reruns.
-                        # --------------------------------------------------
-
-                        if "timeline_description" in st.session_state:
-
-                            st.session_state.timeline_description = ""
-
                         st.rerun()
 
     # ==========================================================
-    # TIMELINE EVENTS
+    # TIMELINE DISPLAY
     # ==========================================================
 
     if patient["timeline"]:
@@ -1490,39 +1486,92 @@ def timeline_page(
             reverse=True,
         )
 
-        for index, event in enumerate(events):
+        st.markdown(
+            "### Medical History"
+        )
 
-            event_date_value = event.get(
+        for event in events:
+
+            event_type = event.get(
+                "type",
+                "Medical Event",
+            )
+
+            event_date = event.get(
                 "date",
                 "",
             )
 
-            event_type_value = event.get(
-                "type",
-                "",
-            )
-
-            event_description = event.get(
+            description = event.get(
                 "description",
                 "",
             )
 
-            st.write(
-                f"**{event_date_value} — "
-                f"{event_type_value}**"
+            source = event.get(
+                "source",
+                "manual",
             )
 
-            if event_description:
+            # --------------------------------------------------
+            # Identify AI-generated events
+            # --------------------------------------------------
 
-                st.caption(
-                    event_description
-                )
+            if (
+                source == "ai"
+                or event.get("ai_generated") is True
+            ):
 
-            if index < len(events) - 1:
+                icon = "🤖"
+                source_label = "AI-generated"
 
-                st.markdown(
-                    "---"
-                )
+            elif event_type == "Medical Document":
+
+                icon = "📄"
+                source_label = "Document"
+
+            elif event_type == "Symptom":
+
+                icon = "🩺"
+                source_label = "Symptom"
+
+            elif event_type == "Medication":
+
+                icon = "💊"
+                source_label = "Medication"
+
+            elif event_type == "Laboratory Test":
+
+                icon = "🧪"
+                source_label = "Laboratory"
+
+            elif event_type == "Appointment":
+
+                icon = "📅"
+                source_label = "Appointment"
+
+            else:
+
+                icon = "📌"
+                source_label = "Manual"
+
+            # --------------------------------------------------
+            # Event display
+            # --------------------------------------------------
+
+            st.markdown(
+                f"**{event_date}**  \n"
+                f"{icon} **{event_type}**"
+            )
+
+            st.caption(
+                description
+            )
+
+            st.caption(
+                f"Source: {source_label}"
+            )
+
+            st.markdown("---")
 
     else:
 
@@ -1534,14 +1583,17 @@ def timeline_page(
         "</div>",
         unsafe_allow_html=True,
     )
-
-
-# ==============================================================
-# ==============================================================
-# MEDICAL DOCUMENTS
-# ==============================================================
-
+    
 def documents_page(patient_id, editable=True):
+
+    # Defensively ensure a patient identifier exists before using it.
+    # This avoids NameError when the page is reached without an explicit
+    # patient_id argument but the selected patient is available in session state.
+    if "patient_id" not in locals():
+        patient_id = st.session_state.get("selected_patient_id")
+
+    if not patient_id:
+        patient_id = st.session_state.get("selected_patient_id")
 
     patient, patients = get_patient_record(patient_id)
 
@@ -1646,6 +1698,120 @@ def documents_page(patient_id, editable=True):
 
                     document_id = new_id("DOC")
 
+                    # --------------------------------------------------
+                    # Save uploaded file locally
+                    # --------------------------------------------------
+
+                    patient_upload_dir = os.path.join(
+                        UPLOADS_DIR,
+                        str(patient_id)
+                    )
+
+                    os.makedirs(
+                        patient_upload_dir,
+                        exist_ok=True
+                    )
+
+                    # Prevent unsafe filenames
+                    safe_filename = os.path.basename(
+                        uploaded.name
+                    )
+
+                    file_path = os.path.join(
+                        patient_upload_dir,
+                        safe_filename
+                    )
+
+                    with open(file_path, "wb") as f:
+                        f.write(uploaded.getbuffer())
+
+                    # Store relative path for future reference
+                    relative_file_path = os.path.relpath(
+                        file_path,
+                        BASE_DIR
+                    )
+                    file_size_kb = round(
+                        os.path.getsize(file_path) / 1024,
+                        1
+                    )
+
+                    # --------------------------------------------------
+                    # Send PDF to MedPath n8n workflow
+                    # --------------------------------------------------
+
+                    N8N_WEBHOOK_URL = (
+                        "https://kavyaas.app.n8n.cloud/webhook-test/medpath/patient-review"
+                    )
+
+                    # --------------------------------------------------
+                    # Send PDF to n8n and receive analysis
+                    # --------------------------------------------------
+
+                    n8n_result = None
+
+                    try:
+
+                        with open(file_path, "rb") as pdf_file:
+
+                            response = http_requests.post(
+                                N8N_WEBHOOK_URL,
+                                files={
+                                    "patient_record": (
+                                        safe_filename,
+                                        pdf_file,
+                                        uploaded.type or "application/pdf"
+                                    )
+                                },
+                                timeout=120
+                            )
+
+                        st.write(
+                            "n8n HTTP Status:",
+                            response.status_code
+                        )
+
+                        if response.ok:
+
+                            st.success(
+                                "✅ PDF successfully processed by n8n."
+                            )
+
+                            try:
+                                n8n_result = response.json()
+
+                            except ValueError:
+
+                                st.error(
+                                    "❌ n8n returned a response that is not valid JSON."
+                                )
+
+                                st.write(
+                                    "n8n Response:",
+                                    response.text
+                                )
+
+                        else:
+
+                            st.error(
+                                f"❌ n8n returned HTTP {response.status_code}"
+                            )
+
+                            st.write(
+                                "n8n Response:",
+                                response.text
+                            )
+
+                    except Exception as e:
+
+                        st.error(
+                            f"❌ Could not connect to n8n: "
+                            f"{type(e).__name__}: {e}"
+                        )
+
+                    # --------------------------------------------------
+                    # Create document record
+                    # --------------------------------------------------
+
                     document = {
                         "id": document_id,
                         "name": uploaded.name,
@@ -1653,19 +1819,61 @@ def documents_page(patient_id, editable=True):
                         "size_kb": file_size_kb,
                         "uploadedAt": datetime.now().isoformat(),
 
-                        # Current status
+                        # Local file
+                        "file_path": relative_file_path,
+
+                        # Upload status
                         "status": "Uploaded",
 
-                        # Future n8n workflow status
-                        "processing_status": "Waiting for workflow",
-                        "analysis_status": "Not analyzed",
-                        "n8n_status": "Not connected yet",
+                        # n8n workflow status
+                        "processing_status": (
+                            "Completed"
+                            if n8n_result
+                            else "Waiting for workflow"
+                        ),
 
-                        # Future AI results
-                        "analysis": None,
+                        "analysis_status": (
+                            "Completed"
+                            if n8n_result
+                            else "Not analyzed"
+                        ),
+
+                        "n8n_status": (
+                            "Connected"
+                            if n8n_result
+                            else "Not connected"
+                        ),
+
+                        # --------------------------------------------------
+                        # AI results returned by n8n
+                        # --------------------------------------------------
+
+                        "analysis": (
+                            n8n_result.get("text")
+                            if isinstance(n8n_result, dict)
+                            else None
+                        ),
+
+                        "analysis_html": (
+                            n8n_result.get("html")
+                            if isinstance(n8n_result, dict)
+                            else None
+                        ),
+
                         "insights": [],
+
                         "timeline_events": [],
-                        "missing_information": []
+
+                        "missing_information": [],
+
+                        # n8n workflow information
+                        "workflow_id": None,
+
+                        "processedAt": (
+                            datetime.now().isoformat()
+                            if n8n_result
+                            else None
+                        )
                     }
 
                     # --------------------------------------------------
@@ -1710,12 +1918,6 @@ def documents_page(patient_id, editable=True):
                     )
 
                     st.rerun()
-
-    else:
-
-        st.info(
-            "Document upload is available from the patient's workspace."
-        )
 
     st.markdown(
         '</div>',
@@ -2610,10 +2812,6 @@ def generate_hypotheses(patient):
         "missing_test": missing_test,
         "summary": summary
     }
-# ==============================================================
-# INSIGHTS
-# ==============================================================
-
 def insights_page(patient_id):
 
     patient, _ = get_patient_record(
@@ -2628,63 +2826,169 @@ def insights_page(patient_id):
 
         return
 
+    # ==========================================================
+    # GENERATE CURRENT ANALYSIS
+    # ==========================================================
+
+    analysis_result = generate_hypotheses(
+        patient
+    )
+
+    # Safety fallback
+    if not isinstance(
+        analysis_result,
+        dict
+    ):
+        analysis_result = {
+            "hypotheses": [],
+            "missing_test": None,
+            "summary": "No clinical analysis available."
+        }
+
+    # ==========================================================
+    # CLINICAL INSIGHTS CARD
+    # ==========================================================
+
     st.markdown(
         '<div class="mp-card"><h4>Clinical Insights</h4>',
         unsafe_allow_html=True,
     )
 
-    if st.session_state.analyzed.get(
-        patient_id
-    ):
+    # ==========================================================
+    # CLINICAL SUMMARY
+    # ==========================================================
 
-        hypotheses = generate_hypotheses(
-            patient
+    st.markdown(
+        "### 🧾 Clinical Summary"
+    )
+
+    st.info(
+        analysis_result.get(
+            "summary",
+            "No clinical summary available."
         )
+    )
 
-        for hypothesis in hypotheses["hypotheses"]:
+    # ==========================================================
+    # PATTERNS & OBSERVATIONS
+    # ==========================================================
+
+    st.markdown(
+        "### 🔎 Patterns & Observations"
+    )
+
+    hypotheses = analysis_result.get(
+        "hypotheses",
+        []
+    )
+
+    if hypotheses:
+
+        for hypothesis in hypotheses:
+
+            condition = hypothesis.get(
+                "condition",
+                "Clinical observation"
+            )
+
+            likelihood = hypothesis.get(
+                "likelihood",
+                "Not specified"
+            )
+
+            evidence = hypothesis.get(
+                "evidence",
+                []
+            )
 
             st.write(
-                f"**{hypothesis['condition']}** — "
-                f"{hypothesis['likelihood']}"
+                f"**{condition}** — "
+                f"{likelihood}"
             )
 
-            st.caption(
-                "Evidence: "
-                + ", ".join(
-                    hypothesis["evidence"]
+            if evidence:
+
+                st.caption(
+                    "Evidence: "
+                    + ", ".join(
+                        str(item)
+                        for item in evidence
+                    )
                 )
-            )
-
-        if hypotheses["missing_test"]:
-
-            st.info(
-                f"Missing information: "
-                f"{hypotheses['missing_test']}"
-            )
 
     else:
 
-        empty_state(
-            "No clinical insights available yet."
+        st.info(
+            "No specific clinical pattern identified "
+            "from the current patient data."
         )
+
+    # ==========================================================
+    # MISSING INFORMATION
+    # ==========================================================
+
+    st.markdown(
+        "### ⚠️ Missing Information"
+    )
+
+    missing_test = analysis_result.get(
+        "missing_test"
+    )
+
+    if missing_test:
+
+        st.warning(
+            f"Additional information that may be useful: "
+            f"{missing_test}"
+        )
+
+    else:
+
+        st.success(
+            "No specific missing information was identified "
+            "by the current analysis."
+        )
+
+    # ==========================================================
+    # FUTURE N8N ANALYSIS
+    # ==========================================================
+
+    st.markdown(
+        "### 🤖 AI Workflow Analysis"
+    )
+
+    st.info(
+        "Document-based AI analysis will appear here "
+        "when the MedPath n8n workflow is connected."
+    )
+
+    st.caption(
+        "The n8n workflow will organize uploaded document "
+        "information, generate timeline events, produce "
+        "analysis and insights, and make the structured "
+        "information available to the MedPath AI Assistant."
+    )
+
+    # ==========================================================
+    # DISCLAIMER
+    # ==========================================================
 
     st.markdown(
         '<div class="mp-disclaimer">'
-        'AI-generated information should be verified by a healthcare professional.'
+        'AI-generated information should be verified by '
+        'a healthcare professional.'
         '</div>',
         unsafe_allow_html=True,
     )
+
+    # ==========================================================
+    # CLOSE CARD
+    # ==========================================================
 
     st.markdown(
         "</div>",
         unsafe_allow_html=True,
     )
-
-
-# ==============================================================
-# ALERTS
-# ==============================================================
-
 def alerts_page(patient_id):
 
     patient, _ = get_patient_record(
@@ -2707,7 +3011,7 @@ def alerts_page(patient_id):
     shown = False
 
     if st.session_state.analyzed.get(
-        patient_id
+        patient_id,False
     ):
 
         hypotheses = generate_hypotheses(
